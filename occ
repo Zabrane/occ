@@ -1,0 +1,1009 @@
+#!/usr/bin/env python3
+
+import sys
+import os
+import argparse
+import json
+import subprocess
+import time
+import pprint
+from threading import Thread
+from threading import Semaphore
+import _thread
+import stat
+import binascii
+import time
+import traceback
+import fcntl
+
+PATH = os.getenv("PATH")
+OCC_CONF_DIR = "%s/.config/occ" % os.getenv("HOME")
+OCC_INDEX_DIR = "%s/index/" % OCC_CONF_DIR
+OCC_HEADER_CACHE_DIR = "%s/header_cache/" % OCC_CONF_DIR
+OCC_COMPILE_DIR = "%s/compile_cache/" % OCC_CONF_DIR
+OCC_PROJECT_FILE_NAME = "occ.project"
+CURRENT_DIR = os.getcwd()
+CURRENT_PROJ_NAME = os.path.basename(CURRENT_DIR)
+CURRENT_PROJ_CONF = os.path.join(CURRENT_DIR, OCC_PROJECT_FILE_NAME)
+VERBOSITY_LEVEL = 0
+COLUMNS = ''
+try:
+    COLUMNS = os.getenv("COLUMNS")
+    if COLUMNS is None:
+        f = open('/dev/null', 'w')
+        COLUMNS = subprocess.check_output('stty size', shell = True, stderr = f).split()[1]
+except:
+    pass
+
+COMMANDS = {}
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = "\033[1m"
+
+    def disable(self):
+        self.HEADER = ''
+        self.OKBLUE = ''
+        self.OKGREEN = ''
+        self.WARNING = ''
+        self.FAIL = ''
+        self.ENDC = ''
+
+def parse_args():
+    global VERBOSITY_LEVEL
+    parser = argparse.ArgumentParser(description='The Omnicloud Compiler toolChain')
+    parser.add_argument('-o', '--output', help = 'Copy the final output binary to this path.', action = 'store')
+    parser.add_argument('-v', '--verbosity', help = 'Turn on verbose output', action = 'count', default = 0)
+    parser.add_argument('-d', '--debug', help = 'Debug build', action = 'store_true')
+    parser.add_argument('-i', '--initialize', help = 'Initialize current directory to an OCC project', choices = ['c', 'cpp'])
+    parser.add_argument('-c', '--compile', help = 'Compile current project', action = 'store_true')
+    parser.add_argument('-cx', '--compile-and-execute', help = 'Compile current project and execute it', action = 'store_true')
+    parser.add_argument('-cnd', '--compile-no-dependencies', help = 'Compile current project without compiling dependencies', action = 'store_true')
+    parser.add_argument('-cc', '--clean', help = 'Removes all previously compiled files and intermediary files', action = 'store_true')
+    parser.add_argument('-cd', '--clean-deep', help = "Removes all previously compiled files and intermediary files for this project and all dependencies", action = 'store_true')
+    parser.add_argument('-ch', '--clean-header-cache', help = "Cleans the header cache", action = 'store_true')
+    parser.add_argument('-p', '--paralimit', help = 'The maximum limit of parallel workers.', action = 'store', type=int, default = 9)
+    parser.add_argument('-r', '--rebuild', help = 'Rebuild current project', action = 'store_true')
+    parser.add_argument('-l', '--link-with', help = 'Link this project with other OCC project', nargs = '+')
+    parser.add_argument('-u', '--unlink', help = 'Remove project as dependency', nargs = '+')
+    parser.add_argument('-x', '--index', help = 'Index current project', action = 'store_true')
+    parser.add_argument('-dx', '--deindex', help = 'Remove the current project from the OCC project index', action = 'store_true')
+    parser.add_argument('-g', '--git', help = 'push: push to remote git, pull: pull from remote git, sync: occasionally push/pull to/from remote git', choices = ['push', 'pull', 'sync'])
+    parser.add_argument('-gpr', '--git-recursive', help = 'Pulls this project and all dependencies', action = 'store_true')
+    parser.add_argument('-m', '--mask', help = 'Build project with the specified mask')
+    parser.add_argument('-am', '--add-default-masks', help = 'Add default compile masks to project file', action = 'store_true')
+    parser.add_argument('-up', '--self-update', help = "Updates the occ.", action = 'store_true')
+    args = parser.parse_args()
+    VERBOSITY_LEVEL = args.verbosity
+    return args
+
+print_lock = _thread.allocate_lock()
+
+already_compiled_projects = []
+already_compiled_projects_lock = _thread.allocate_lock()
+
+def log(message):
+    with print_lock:
+        sys.stderr.write("%s%s%s\n" % (bcolors.HEADER, message, bcolors.ENDC))
+
+def log_ok(message):
+    with print_lock:
+        sys.stderr.write("%s%s%s\n" % (bcolors.OKGREEN, message, bcolors.ENDC))
+
+def log_warn(message):
+    with print_lock:
+        sys.stderr.write("%s%s%s\n" % (bcolors.WARNING, message, bcolors.ENDC))
+
+def fail_external(message, external_error_data):
+    with print_lock:
+        sys.stderr.write("%sError: %s%s\n" % (bcolors.FAIL, message, bcolors.ENDC))
+        sys.stderr.write(external_error_data)
+        sys.stderr.write("\n")
+        os._exit(1)
+
+def fail(message):
+    with print_lock:
+        sys.stderr.write("%sError: %s%s\n" % (bcolors.FAIL, message, bcolors.ENDC))
+        os._exit(1)
+
+def debug(message, vl):
+    if vl <= VERBOSITY_LEVEL:
+        with print_lock:
+            sys.stderr.write("(%s) %s\n" % (vl, message))
+
+def read_json(path):
+    try:
+        f = open(path, 'r')
+        json_obj = json.load(f)
+        f.close()
+        return json_obj
+    except ValueError as e:
+        debug("ValueError occurred: %s" % e, 1)
+        fail("Parsing json in path failed @ [%s]" % path)
+    except Exception as e:
+        debug("Exception occurred: %s" % e, 1)
+        fail("Parsing json in path failed @ [%s]" % path)
+
+def write_json(path, obj):
+    try:
+        f = open(path, 'w')
+        json.dump(obj, f, indent=4)
+        f.close()
+    except Exception as e:
+        fail("Could not write project cont")
+
+def populate_project_obj(obj):
+    default_project_obj = {
+      "compiler": "clang",
+      "preprocessor": "clang",
+      "project-linker": "clang",
+      "output" : CURRENT_PROJ_NAME,
+      "pkg-config" : [],
+      "dependencies" : [],
+      "include": [],
+      "general-flags" : ["-nostdlib", "-Werror"],
+      "pp-flags": [],
+      "o-flags": [],
+      "o-env": {},
+      "installdir" : "",
+      "library" : "",
+      "additional-src-dirs": [],
+      "dependency-build-mask" : "",
+    }
+    for key in default_project_obj.keys():
+        if key in obj:
+            continue
+        obj[key] = default_project_obj[key]
+    return obj
+
+def read_project_json(json_path):
+#    print('read_project_json: ' + json_path)
+    project_json = read_json(json_path)
+    if project_json == None:
+        fail("Could not read project file: \"%s\"" % CURRENT_PROJ_CONF)
+    return populate_project_obj(project_json)
+
+def get_project_path(project_cfg_path):
+    return os.path.dirname(project_cfg_path)
+
+def get_project_name(project_cfg_path):
+    return os.path.basename(get_project_path(project_cfg_path))
+
+def touch_dir(directory):
+    if not os.path.exists(directory):
+        try:
+            os.makedirs(directory)
+        except FileExistsError:
+            pass
+
+GITIGNORE = '''
+Makefile
+*.slo
+*.lo
+*.o
+*.so
+*.lai
+*.la
+*.a
+'''
+
+README = '''
+Readme for PROJECTNAME
+======================
+'''
+
+def get_command(command):
+    if command in COMMANDS:
+        return COMMANDS[command]
+    # first check if is occ binary
+    command_path = os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), command)
+    if not os.path.exists(command_path):
+        # then check if system binary
+        try:
+            which_output = subprocess.check_output("which %s" % command, shell = True)
+            command_path = which_output.decode("utf-8").replace("\n", "")
+        except subprocess.CalledProcessError as e:
+            fail("Your system does not appear to support '%s'." % command)
+    COMMANDS[command] = command_path
+    return command_path
+
+def get_project_index_path(project_name):
+    return os.path.join(OCC_INDEX_DIR, project_name)
+
+def get_project_path_by_index(project_name):
+    index_path = get_project_index_path(project_name)
+    #print(os.path.realpath(index_path))
+    realpath = os.path.realpath(index_path)
+    project_path = "/" + "/".join(filter(None, realpath.split("/")[:-1]))
+    return project_path
+
+###
+# Initializes the current project to a OCC project.
+# Adds an entry in the users "global" OCC db.
+###
+def initialize_occ_project():
+    log("Initializing project")
+    debug("Current dir: %s" % CURRENT_DIR, 2)
+    project_index_path = get_project_index_path(CURRENT_PROJ_NAME);
+    debug("Checking if name is unique (%s)" % project_index_path, 2)
+    if (os.path.islink(project_index_path)):
+        fail("A project named '%s' is already indexed, occ does not support project name duplicates on a system." % CURRENT_PROJ_NAME)
+    for x in ['src', 'libs', 'include', 'tests']:
+        p = os.path.join(CURRENT_DIR, "%s" % x)
+        if not os.path.exists(p):
+            debug("Creating directory %s" % x, 2)
+            os.mkdir(p)
+    if not os.path.exists(CURRENT_PROJ_CONF):
+        compiler = "clang"
+        project_json = populate_project_obj({});
+        project_json["compiler"] = compiler;
+        write_json(CURRENT_PROJ_CONF, project_json)
+    index_occ_project();
+    if not os.path.exists(CURRENT_DIR + "/.gitignore"):
+        f = open(CURRENT_DIR + "/.gitignore", 'w')
+        f.write(GITIGNORE)
+        f.close()
+    if not os.path.exists(CURRENT_DIR + "/README.md"):
+        f = open(CURRENT_DIR + "/README.md", 'w')
+        f.write(README.replace("PROJECTNAME", CURRENT_PROJ_NAME))
+        f.close()
+    log("Project initialized. See \"%s\" for details" % OCC_PROJECT_FILE_NAME)
+
+##
+# Adds the current project to the "Global" project list
+##
+def index_occ_project():
+    log ("Indexing current project")
+    if not os.path.exists(CURRENT_PROJ_CONF):
+        fail("This isn't a OCC project, cannot index")
+    project_index_path = get_project_index_path(CURRENT_PROJ_NAME)
+    if (os.path.islink(project_index_path)):
+        fail("A project with this name is already indexed.")
+    os.symlink(CURRENT_PROJ_CONF, project_index_path)
+
+
+def deindex_occ_project():
+    log("De-indexing current project");
+    if not os.path.exists(OCC_INDEX_DIR):
+        fail("The OCC index doesn't exist\n")
+    project_index_path = get_project_index_path(CURRENT_PROJ_NAME)
+    if (os.path.lexists(project_index_path)):
+        os.unlink(project_index_path)
+        log("Project unlinked\n")
+    else:
+        fail("The current project isn't indexed (%s)\n" % project_index_path)
+
+def execute_compile(compile_str, log_path):
+    try:
+        f = open(log_path, 'w')
+        f.write(compile_str)
+        status = subprocess.call([compile_str], shell = True, stdout = f, stderr = f)
+        f.close()
+        if status:
+            return False
+        return True
+    except subprocess.CalledProcessError as e:
+        return False
+    except IOError as e:
+        return False
+    except ValueError as e:
+        return False
+
+def write_header_cache(d_cache_path, headers):
+    hc = {}
+    for header in headers:
+        header_mtime = os.stat(header).st_mtime
+        hc[header] = header_mtime
+    write_json(d_cache_path, hc)
+
+def check_d_cache(d_cache_path):
+    debug("[check_d_cache] checking if d cache is old [%s]" % d_cache_path, 3)
+    try:
+        if (not os.path.exists(d_cache_path)):
+            return True
+        hc = read_json(d_cache_path)
+        for header in hc.keys():
+            old_header_mtime = hc[header]
+            new_header_mtime = os.stat(header).st_mtime
+            if new_header_mtime != old_header_mtime:
+                debug("[evaluate_header_cache] evaluate_header_cache: found changed dependency [%s]" % (header), 3)
+                return True
+        return False
+    except OSError as e:
+        os.unlink(d_cache_path)
+        return True
+
+def file_get_d_cache_path(input_path):
+    input_file_name = os.path.basename(input_path)
+    unique_path_key = binascii.crc32(bytes("/".join(os.path.split(input_path)).lower(), "UTF-8"))
+    return os.path.join(OCC_HEADER_CACHE_DIR, input_file_name + "." + ('%08x' % unique_path_key) + ".d")
+
+def file_needs_processing(input_paths, output_path):
+    debug("[file_needs_processing] cheking for I/O: [%s] [%s]" % (input_paths, output_path), 3)
+    try:
+        output_stat = os.stat(output_path)
+        if type(input_paths) is str:
+            input_paths = [input_paths]
+        latest_input_mtime = 0
+        latest_input_path = None
+        for input_path in input_paths:
+            input_mtime = os.stat(input_path).st_mtime
+            if (input_mtime > latest_input_mtime):
+                latest_input_mtime = input_mtime
+                latest_input_path = input_path
+        needs_processing = output_stat.st_size == 0 or latest_input_mtime >= output_stat.st_mtime
+        #if needs_processing:
+            #print("needs_processing triggered: [%s] -> [%s] input-mtime:[%s] output-mtime: [%s] statsize:[%s]" % (latest_input_path, output_path, latest_input_mtime, output_stat.st_mtime, output_stat.st_size))
+            #print(needs_processing)
+            #traceback.print_stack()
+            #exit(1)
+        return needs_processing
+    except OSError as e:
+        debug("[file_needs_processing] returning true after failure: " + str(e), 3)
+        return True
+
+def get_preprocessor_post_run_fn(d_cache_tmp_path, d_cache_path):
+    def preprocessor_post_run_fn():
+        fh = open(d_cache_tmp_path, 'r')
+        included_headers = []
+        for line in fh:
+            space_pos = line.find(" ")
+            included_headers.append(line[space_pos:].strip("\n").replace(" ", ""))
+        fh.close()
+        os.unlink(d_cache_tmp_path)
+        write_header_cache(d_cache_path, included_headers)
+    return preprocessor_post_run_fn
+
+def get_command_fn(cmd, sem, print_msg, env = {}, wait_thread = None, post_run = None):
+    def command_fn():
+        stderr = b""
+        if (wait_thread is not None):
+            wait_thread.join()
+        sem.acquire(True)
+        log(print_msg)
+        try:
+            proc = subprocess.Popen(['/bin/bash', '-c', "set -e; set -o pipefail;" + cmd], env=env, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout, stderr = proc.communicate()
+            rcode = proc.wait()
+            if (rcode != 0):
+                raise Exception()
+            if post_run is not None:
+                post_run()
+        except Exception as e:
+            fail_external("Command failed: [%s]\n%s\n" % (cmd, e), stderr.decode("utf-8"))
+        sem.release()
+    return command_fn
+
+def get_project_json_with_mask(project_cfg_path, build_mask):
+    project_json = populate_project_obj(read_json(project_cfg_path))
+    if "build-masks" not in project_json:
+        fail("No masks present in project configuration")
+    if build_mask not in project_json["build-masks"]:
+        fail("Unknown build-mask \"%s\"" % build_mask)
+    build_mask_values = project_json["build-masks"][build_mask]
+    for key in build_mask_values.keys():
+        value = build_mask_values[key]
+        if key not in project_json:
+            fail("Unknown key %s in project mask" % key)
+        if type(value) == str:
+            project_json[key] = value
+        elif type(value) == list:
+            project_json[key] += value
+        elif type(value) == dict:
+            project_json[key].update(value)
+        else:
+            fail("Unknown type of key %s in project mask" % key)
+    return project_json
+
+def compile_occ_project(project_cfg_path, sem, i_dirs = [], use_build_mask = False, build_mask = ""):
+    constant_compiler_flags = " -Xclang -fcolor-diagnostics -Qunused-arguments"
+    project_name = get_project_name(project_cfg_path)
+    project_path = get_project_path(project_cfg_path)
+    debug("Compiling project [%s] (%s)" % (project_name, project_path), 1)
+    project_json = None
+    if not use_build_mask:
+        project_json = read_project_json(project_cfg_path)
+    else:
+        project_json = get_project_json_with_mask(project_cfg_path, build_mask)
+    force_recompile = False
+    if not use_build_mask and "build-masks" in project_json:
+        fail("Detected build-masks in project configuration but none given to OCC\nBuild-masks specified for this project: %s\nUse \"occ -c -m %s\"" % (" ".join(project_json["build-masks"].keys()), "|".join(project_json["build-masks"].keys())))
+    conf_objs = " ".join(project_json["pkg-config"])
+    source_paths = [os.path.join(project_path, "src")]
+    for additional_src_dir in project_json["additional-src-dirs"]:
+        source_paths += [os.path.join(project_path, additional_src_dir)]
+    include_dirs = [
+        os.path.join(project_path, "include"),
+    ] + source_paths + i_dirs
+    for include_dir in project_json["include"]:
+        if include_dir[0] != '/':
+            include_dir = os.path.join(project_path, include_dir)
+        include_dirs.append(include_dir)
+    include_dirs_arg = "-I" + " -I".join(include_dirs)
+    preprocessor_bin = get_command(project_json["preprocessor"])
+    compiler_bin = get_command(project_json["compiler"])
+    general_flags = " ".join(project_json["general-flags"])
+    build_mask_label = "default" if (build_mask == "") else ("_" + build_mask)
+    output_path = os.path.join(OCC_COMPILE_DIR, project_name, build_mask_label)
+    touch_dir(output_path)
+    output_path_file = os.open(output_path, os.O_DIRECTORY)
+    fcntl.flock(output_path_file, fcntl.LOCK_EX)
+    debug("source paths \"%s\"" % str(source_paths), 1)
+    debug("include dirs \"%s\"" % include_dirs_arg, 1)
+    debug("output path \"%s\"" % output_path, 1)
+    # preprocess
+    # taking all source files in /src/*.[c|cpp] and outputing them as preprocessed files in OCC_COMPILE_DIR/[project-name]/*.i
+    preprocessed_paths = {}
+    preprocessors = {}
+    for source_path in source_paths:
+        for source_file_name in os.listdir(source_path):
+            source_name, source_ext = os.path.splitext(source_file_name)
+            source_file_path = os.path.join(source_path, source_file_name)
+            if (source_ext == ".s"):
+                preprocessed_paths[source_file_path] = source_file_path
+                continue
+            if (source_ext != ".c"):
+                continue
+            out_i_path = os.path.join(output_path, os.path.basename(source_path) + "_" + source_name + ".i")
+            preprocessed_paths[source_file_path] = out_i_path
+            d_cache_path = file_get_d_cache_path(source_file_path)
+            if not file_needs_processing([project_cfg_path, source_file_path], out_i_path) and not force_recompile:
+                if not check_d_cache(d_cache_path):
+                    continue
+            d_cache_tmp_path = d_cache_path + ".tmp"
+            compiler_pipe = ("%s -H -E -x c %s %s %s" % (preprocessor_bin, general_flags + " " + " ".join(project_json["pp-flags"]), constant_compiler_flags, include_dirs_arg))
+            compiler_d_cache_pipe = ("%s 2> >(tee %s 1>&2)" % (compiler_pipe, d_cache_tmp_path))
+            env = {
+                "PATH": PATH,
+                "COLUMNS": COLUMNS,
+                "INPUT_FILE": source_file_name
+            }
+            out_tmp_i_path = out_i_path + ".tmp"
+            preprocess_command = "%s \"%s\" 1> >(set -e; cat - > %s; mv %s %s)" % (compiler_d_cache_pipe, source_file_path, out_tmp_i_path, out_tmp_i_path, out_i_path)
+            preprocessor = Thread()
+            preprocessor.run = get_command_fn(preprocess_command, sem, "Preprocessing %s" % source_file_path, env = env, post_run = get_preprocessor_post_run_fn(d_cache_tmp_path, d_cache_path))
+            preprocessor.start()
+            preprocessors[source_file_path] = preprocessor
+            debug("Preprocessing source file [%s] with command [%s]" % (source_file_path, preprocess_command), 2)
+    # creating object files from library sources
+    # executing library build scripts in libs/[lib-name].build and writing them as object files to OCC_COMPILE_DIR/[project-name]/libs/[lib-name]/*.o
+    o_file_paths = []
+    libs_dir = os.path.join(project_path, "libs")
+    if (os.path.isdir(libs_dir)):
+        for f in os.listdir(libs_dir):
+            lib_name, ext = os.path.splitext(f)
+            if (ext == ".build"):
+                debug("Found static library %s in libs, building..." % lib_name, 1)
+                # clean library object file build output
+                lib_build_dir = os.path.join(output_path, "libs", lib_name)
+                touch_dir(lib_build_dir)
+                # call library build script - should generate object files in build/$lib_name
+                output_o_files_raw = subprocess.check_output([os.path.join(libs_dir, f), lib_build_dir, build_mask], shell = False)
+                output_o_files = filter(None, output_o_files_raw.decode('UTF-8').split("\n"))
+                # add generated o files to o_file_paths
+                for new_o_file in output_o_files:
+                    if (new_o_file == ''):
+                        continue
+                    ext = os.path.splitext(new_o_file)[1]
+                    if (ext != ".o"):
+                        continue
+                    o_file_paths.append(os.path.join(lib_build_dir, new_o_file))
+    # creating object files from source
+    # taking from preprocessed files in OCC_COMPILE_DIR/[project-name]/*.i and writing them as objects files in OCC_COMPILE_DIR/[project-name]/*.o
+    o_creators = []
+    for source_file_path in preprocessed_paths:
+        preprocessed_path = preprocessed_paths[source_file_path]
+        source_file_name = os.path.basename(preprocessed_path)
+        source_name, source_ext = os.path.splitext(source_file_name)
+        out_o_path = os.path.join(output_path, source_name + ".o")
+        o_file_paths.append(out_o_path)
+        if source_file_path in preprocessors:
+            wait_thread = preprocessors[source_file_path]
+        else:
+            if not file_needs_processing([project_cfg_path, preprocessed_path], out_o_path) and not force_recompile:
+                #print("[%s] skipping compile" % out_o_path)
+                continue
+            wait_thread = None
+        input_format = {
+            ".i": "cpp-output",
+            ".s": "assembler",
+        }[source_ext.lower()]
+        extra_compiler_flags = "-x " + input_format + " " + " ".join(project_json["o-flags"])
+        out_tmp_o_path = out_o_path + ".tmp"
+        compile_command = "set -e; %s %s %s %s > %s; mv %s %s" % (compiler_bin, general_flags, extra_compiler_flags, preprocessed_path, out_tmp_o_path, out_tmp_o_path, out_o_path)
+        env = {
+            "PATH": PATH,
+            "COLUMNS": COLUMNS,
+            "INCLUDE_ARGS": include_dirs_arg,
+            "INPUT_FORMAT": input_format,
+            "INPUT_FILE": preprocessed_path
+        }
+        env.update(project_json["o-env"])
+        o_creator = Thread()
+        o_creator.run = get_command_fn(compile_command, sem, "Compiling file \"%s\"" % source_file_path, env = env, wait_thread = wait_thread)
+        o_creator.start()
+        o_creators.append(o_creator)
+        debug("Compiling object file [%s] with command [%s]" % (out_o_path, compile_command), 1)
+    for o_creator in o_creators:
+        o_creator.join()
+    os.close(output_path_file)
+    return o_file_paths
+
+'''
+output = target of compilation, ie path to executable
+compiler = the compiler specified in the project_json
+general_flags = ["-nostdlib"]
+conf_objs = ["pthread", ...] (only pkg-config able stuff)
+o_files = ["list", "of", "object", "files", "with", "full", "path"]
+'''
+def link_occ_project(project_linker, output, general_flags, conf_objs, o_files, libraries):
+    if len(o_files) == 0:
+        log("Nothing to link")
+        return True
+    log("Linking to %s" % output)
+    conf_objs = ("", "`pkg-config --libs %s`" % " ".join(conf_objs))[len(conf_objs) > 0]
+    o_files = " ".join(o_files)
+    general_flags = " ".join(general_flags)
+    if len(libraries) > 0:
+        libraries = " ".join(libraries)
+    else:
+        libraries = ""
+    compiler_cmd = "%s %s %s %s %s -o %s" % (project_linker, general_flags, o_files, libraries, conf_objs, output)
+    debug(compiler_cmd, 1)
+    status = subprocess.call([compiler_cmd], shell=True)
+    if status == 0:
+        return True
+    else:
+        return False
+
+def link_occ_library(output, lib_type, o_files):
+    if "no-compile" in lib_type or len(o_files) == 0:
+        return "OK"
+    log("Linking library to %s" % output)
+    if os.path.exists(output):
+        os.unlink(output)
+    if "static" in lib_type:
+        compiler_cmd = "%s -cvq %s" % (get_command("ar"), output)
+        o_files = " ".join(o_files)
+        compiler_cmd += " %s" % o_files
+        try:
+            subprocess.check_output("%s" % (compiler_cmd), shell=True)
+            log_ok("Linking of \"%s\" complete" % output)
+            return output
+        except Exception as e:
+            fail("Linking of \"%s\" failed" % output)
+    else:
+        fail("Unsupported library type. (non-static)")
+
+def gather_project_i_dirs_and_libraries(proj, already_scanned_projects = [], build_mask = ''):
+    i_dirs = []
+    libraries = []
+    conf_objs = []
+    general_flags = []
+    curr_proj_cfg = os.path.realpath(os.path.join(OCC_INDEX_DIR, proj))
+    curr_proj_json = read_project_json(curr_proj_cfg)
+    curr_proj_name = get_project_name(curr_proj_cfg)
+    curr_proj_path = get_project_path(curr_proj_cfg)
+#    print('curr_proj_cfg: ' + curr_proj_cfg)
+#    print('curr_proj_name: ' + curr_proj_name)
+#    print('curr_proj_path: ' + curr_proj_path)
+#    print('curr_proj_json: ' + json.dumps(curr_proj_json))
+    for p in curr_proj_json['dependencies']:
+        if p in already_scanned_projects:
+            continue
+        cur_i_dirs, cur_libraries, cur_conf_objs, cur_compiler_flags = gather_project_i_dirs_and_libraries(p, already_scanned_projects, build_mask = build_mask)
+        i_dirs += cur_i_dirs
+        for lib in cur_libraries:
+            if not lib in libraries:
+                libraries.append(lib)
+        conf_objs += cur_conf_objs
+        general_flags += cur_conf_objs
+        already_scanned_projects.append(p)
+    i_dirs += [os.path.join(curr_proj_path, 'include')]
+    if len(curr_proj_json['library']) > 0:
+#        print('library')
+        curr_library_path = ''
+        if build_mask == '':
+            curr_library_path = os.path.join(curr_proj_path, 'build', curr_proj_json['output'])
+        else:
+            curr_library_path = os.path.join(curr_proj_path, 'build', curr_proj_json['build-masks'][build_mask]['output'])
+        libraries.append(curr_library_path)
+        #        print('curr_library_path: ' + curr_library_path)
+        conf_objs += curr_proj_json['pkg-config']
+        general_flags += curr_proj_json['general-flags']
+    return (i_dirs, libraries, conf_objs, general_flags)
+
+
+def get_compile_fn(proj_conf_path, sem, i_dirs = [], use_build_mask = False, build_mask = "", compile_dependencies = True):
+    def compile_fn():
+        compile_occ_project_r(proj_conf_path, sem, i_dirs = i_dirs, use_build_mask = use_build_mask, build_mask = build_mask, compile_dependencies = compile_dependencies)
+    return compile_fn
+
+##
+# Compiles the current project
+##
+def compile_occ_project_r(proj_conf_path, sem, i_dirs = [], use_build_mask = False, build_mask = "", compile_dependencies = True):
+    debug("[compile_occ_project_r] compiling project with proj_conf_path [%s]" % proj_conf_path, 1)
+    project_json = None
+    if not use_build_mask:
+        project_json = read_project_json(proj_conf_path)
+    else:
+        project_json = get_project_json_with_mask(proj_conf_path, build_mask)
+    project_name = get_project_name(proj_conf_path)
+    is_library = len(project_json["library"]) > 0
+    debug("[compile_occ_project_r] project_json decoded [%s]" % project_json, 3)
+    project_build_path = os.path.join(os.path.dirname(proj_conf_path), "build")
+    touch_dir(project_build_path)
+    conf_objs = []
+    general_flags = []
+    libraries = []
+    debug("[%s] checking dependencies" % project_name, 1)
+    dependencies = project_json["dependencies"]
+    dependency_build_mask = project_json["dependency-build-mask"]
+    if use_build_mask and dependency_build_mask == "":
+        dependency_build_mask = build_mask
+    indexed = os.listdir(OCC_INDEX_DIR)
+    comp = True
+    for proj in dependencies:
+        if proj not in indexed:
+            log("Cannot resolve dependency: \"%s\"" % proj)
+            comp = False
+    if not comp:
+        fail("Compilation cannot continue due to unresolved dependencies")
+    debug("[%s] all dependencies found" % project_name, 1)
+    r_compiler_threads = []
+    for dep_proj in dependencies:
+        with already_compiled_projects_lock:
+            if dep_proj in already_compiled_projects:
+                continue
+            already_compiled_projects.append(dep_proj)
+        if compile_dependencies:
+            curr_proj_cfg = os.path.realpath(os.path.join(OCC_INDEX_DIR, dep_proj))
+            curr_proj_json = read_project_json(curr_proj_cfg)
+            thread = Thread()
+            thread.run = get_compile_fn(curr_proj_cfg, sem, i_dirs, use_build_mask = use_build_mask, build_mask = dependency_build_mask)
+            thread.start()
+            r_compiler_threads.append(thread)
+        cur_i_dirs, cur_libraries, cur_conf_objs, cur_compiler_flags = gather_project_i_dirs_and_libraries(dep_proj, build_mask = dependency_build_mask)
+        if not compile_dependencies:
+            non_existing_libraries = []
+            for cur_library in cur_libraries:
+                if not os.path.exists(cur_library):
+                    non_existing_libraries.append(cur_library)
+            if len(non_existing_libraries) > 0:
+                fail("Expected the following static libraries to exist (output from the linker stage) but they where missing: %s\n\nCannot compile without dependencies, please run occ again with -c instead of -cnd." % non_existing_libraries)
+            log_ok("Skipping dependency [%s]" % dep_proj)
+        i_dirs += cur_i_dirs
+        # We are not intrested in linking with dependency libraries unless we are linking an executable.
+        if not is_library:
+            libraries += cur_libraries
+        conf_objs += cur_conf_objs
+        general_flags += cur_compiler_flags
+    for thread in r_compiler_threads:
+        thread.join()
+    #print('i dirs: ' + ":".join(i_dirs))
+    o_files = compile_occ_project(proj_conf_path, sem, i_dirs = i_dirs, use_build_mask = use_build_mask, build_mask = build_mask)
+    if o_files == None:
+        fail("Compilation cannot continue - no object files are present.")
+    linker_output = os.path.join(project_build_path, project_json["output"])
+    linker_output_lockfile = linker_output + ".lock"
+    lock_file = None
+    while lock_file is None:
+        debug("[compile_occ_project_r] linker locking, opening [%s]" % linker_output_lockfile, 2)
+        lock_file = os.open(linker_output_lockfile, os.O_RDONLY | os.O_CREAT)
+        debug("[compile_occ_project_r] linker locking, opening [%s]" % linker_output_lockfile, 2)
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        if os.fstat(lock_file).st_nlink == 0:
+            debug("[compile_occ_project_r] linker locking, failed [%s]" % linker_output_lockfile, 2)
+            os.close(lock_file)
+            lock_file = None
+    if file_needs_processing([proj_conf_path] + o_files + libraries, linker_output):
+        log("Linking project [%s]" % project_name)
+        if is_library:
+            result = link_occ_library(linker_output, project_json["library"], o_files)
+        else:
+            # IMPORTANT: Libraries must be ordered so dependencies comes last. If A needs B and B needs C the order should be A B C. This is the opposite order of the libraries array at this point so we reverse it.
+            libraries.reverse()
+            result = link_occ_project(project_json["project-linker"], linker_output, project_json["general-flags"], conf_objs, o_files, libraries)
+        if result:
+            log_ok("Linking of [%s] complete" % project_name)
+        else:
+            fail("Linking of [%s] failed" % project_name)
+    else:
+        log_ok("Linking of [%s] not required" % project_name)
+    os.unlink(linker_output_lockfile)
+    os.close(lock_file)
+    return linker_output
+
+##
+# Handles git push/pull requests and also makes it possible to continuously sync the project.
+##
+def git_occ_project(arg):
+    log("Starting GIT")
+    if not os.path.exists(os.path.join(CURRENT_DIR, ".git")):
+        fail("This is not a git directory")
+    if arg == 'push':
+        try:
+            status = subprocess.call("git push", shell = True)
+        except subprocess.CalledProcessError as e:
+            fail("A git exception occurred: %s " % e)
+        return
+    elif arg == 'pull':
+        try:
+            status = subprocess.call("git pull", shell = True)
+        except subprocess.CalledProcessError as e:
+            debug("git pull failed", 0)
+        return
+    else:
+        while 1:
+            output = ""
+            try:
+                output = subprocess.check_output(["git pull"], stderr = subprocess.STDOUT, shell = True)
+                output = subprocess.check_output(["git push"], stderr = subprocess.STDOUT, shell = True)
+                sys.stdout.write("\r%sLast sync %s OK%s            " % (bcolors.OKGREEN, time.ctime(), bcolors.ENDC))
+                sys.stdout.flush()
+                time.sleep(20)
+            except subprocess.CalledProcessError as e:
+                log_warn("\nA git exception occurred: %s" % e)
+                log_warn("Command output\n%s" % e.output)
+#                sndfile = "/" + "/".join(filter(None, os.path.realpath(sys.argv[0]).split("/")[:-1])) + "/audio/go.wav"
+#                output = subprocess.check_output(["mplayer %s -af volume=-20 -speed 1.6" % sndfile], stderr = subprocess.STDOUT, shell = True)
+                exit(1)
+            except KeyboardInterrupt as e:
+                log("\nExiting")
+                return
+
+def get_project_dependencies(proj_conf_path=None):
+    if proj_conf_path == None:
+        fail("Cannot pull bad dir")
+    project_config = read_project_json(proj_conf_path)
+    project_path = get_project_path(proj_conf_path)
+    proj_paths = []
+    proj_paths.append(project_path)
+    for dep in project_config["dependencies"]:
+        project_path = get_project_path_by_index(dep)
+        n_project_conf_path = os.path.join(project_path, "occ.project")
+        proj_paths += get_project_dependencies(n_project_conf_path)
+    return proj_paths
+
+def git_recursively(proj_conf_path=None):
+    if proj_conf_path == None:
+        fail("Cannot pull bad dir")
+    popens = []
+    project_paths = get_project_dependencies(proj_conf_path)
+    project_paths = list(set(project_paths))
+    project_paths.append(get_occ_path())
+    project_paths.sort()
+    top_levels =[]
+    for path in project_paths:
+        os.chdir(path)
+        try:
+            top_level = subprocess.check_output("git rev-parse --show-toplevel", shell=True)
+            top_level = top_level.decode("utf-8").replace("\n", "")
+            if top_level not in top_levels:
+                top_levels.append(top_level)
+        except Exception as e:
+            fail(e)
+    top_levels.sort()
+    for level in top_levels:
+        os.chdir(level)
+        log("Adding path: {}".format(level))
+        try:
+            popens.append(subprocess.Popen("git pull && git push", shell=True))
+        except Exception as e:
+            fail(e)
+
+    for popen in popens:
+        popen.wait()
+
+def add_dependencies_to_occ_project(links):
+    #remove potential duplicates
+    log("Adding dependencies")
+    links = list(set(links))
+    project_json = read_project_json(CURRENT_PROJ_CONF)
+    if project_json == None:
+        fail("Could not read project config")
+    num_added = 0
+    for link in links:
+        if os.path.exists(OCC_INDEX_DIR + link):
+            log("Adding dependency \"%s\"" % link)
+            project_json["dependencies"].append(link)
+            num_added += 1
+        else:
+            fail("Cannot resolve dependency \"%s\", try indexing it first" % link)
+
+    if num_added == 0:
+        log("No dependencies added")
+        exit(1)
+    else:
+        project_json["dependencies"] = sorted(list(set(project_json["dependencies"])))
+        write_json(CURRENT_PROJ_CONF, project_json)
+        log("Added %s %s\n" % (num_added, ("dependencies", "dependency")[num_added == 1]))
+
+def remove_dependencies_from_occ_project(links):
+    log("Removing \"%s\" from project dependencies" % ",".join(links))
+    links = list(set(links))
+    project_json = read_project_json(CURRENT_PROJ_CONF)
+    if project_json == None:
+        fail("Could not read project config")
+    num_removed = len(project_json["dependencies"])
+    if project_json == None:
+        fail("Could not read project config")
+    project_json["dependencies"] = list(set(project_json["dependencies"]) ^ set(links))
+    num_removed -= len(project_json["dependencies"])
+    if num_removed > 0:
+        log("Removed %s %s\n" % (num_removed, ("dependency", "dependencies")[num_removed > 0]))
+        write_json(CURRENT_PROJ_CONF, project_json)
+    else:
+        log_warn("Failed to remove any dependencies")
+        exit(1)
+
+def clean_occ_project():
+    project_json = read_project_json(CURRENT_PROJ_CONF)
+    if project_json == None:
+        fail("Could not read project config")
+    log("Cleaning for project \"%s\"" % CURRENT_PROJ_NAME)
+    output_path = CURRENT_DIR + "build/" + project_json["output"]
+    if os.path.exists(output_path):
+        os.unlink(output_path)
+        log("Removed \"%s\"" % output_path.split("/")[-1])
+    if "build-masks" in project_json:
+        for mask in project_json["build-masks"]:
+            mask_output_path = os.path.join(CURRENT_DIR, "build", project_json["build-masks"][mask]["output"])
+            if os.path.exists(mask_output_path):
+                os.unlink(mask_output_path)
+    log("Cleaning compile directory")
+    output_path = OCC_COMPILE_DIR + CURRENT_PROJ_NAME
+    if os.path.exists(output_path):
+        shutil.rmtree(output_path, ignore_errors = True)
+    log("Cleanup done\n")
+
+def clean_occ_project_deep(project_conf):
+    project_json = read_project_json(project_conf)
+    for dep in project_json["dependencies"]:
+        curr_proj_conf = get_project_index_path(dep)
+        clean_occ_project_deep(curr_proj_conf)
+    log("Cleaning for project %s" % os.path.basename(os.path.dirname(os.path.realpath(project_conf))))
+    project_build = os.path.join(os.path.dirname(os.path.realpath(project_conf)), "build", project_json["output"])
+    if os.path.exists(project_build):
+        os.unlink(project_build)
+    if "build-masks" in project_json:
+        for mask in project_json["build-masks"]:
+            mask_output_path = os.path.join(os.path.dirname(os.path.realpath(project_conf)), "build", project_json["build-masks"][mask]["output"])
+            if os.path.exists(mask_output_path):
+                os.unlink(mask_output_path)
+    output_path = os.path.join(OCC_COMPILE_DIR, os.path.basename(os.path.dirname(os.path.realpath(project_conf))))
+    if os.path.exists(output_path):
+        shutil.rmtree(output_path, ignore_errors = True)
+    log("Cleaning of project done")
+
+def clean_header_cache():
+    log("Cleaning header cache")
+    if not os.path.exists(OCC_HEADER_CACHE_DIR):
+        log_warn("Nothing to clean\n")
+        return
+    for file in os.listdir(OCC_HEADER_CACHE_DIR):
+        os.unlink(os.path.join(OCC_HEADER_CACHE_DIR, file))
+    log("Done")
+
+def add_default_mask(proj_conf_path):
+    project_json = read_project_json(proj_conf_path)
+    if "build-masks" in project_json:
+        fail("Cannot add default masks to a project conf that already has them")
+    output, ext = os.path.splitext(project_json["output"])
+    project_json["build-masks"] = {"debug" : {"output" : output + ".debug" + ext, "general-flags" : ["-DDEBUG"]}, "release" : {"output" : project_json["output"], "general-flags" : ["-O3"]}}
+    write_json(proj_conf_path, project_json)
+    log("Added default compile masks")
+
+##
+# Rebuilds the project ie: cleans the project and then compiles it
+##
+import shutil
+def rebuild_occ_project(project_cfg_path, use_build_mask = False, build_mask = ""):
+    log("Cleaning for rebuild")
+    project_json = read_json(project_cfg_path)
+    if project_json == None:
+        fail("Could not open project configuration")
+    log("Removing compiled files for \"%s\"" % CURRENT_PROJ_NAME)
+    clean_occ_project_deep(project_cfg_path)
+    log("Cleanup complete\n")
+    compile_occ_project_r(project_cfg_path, use_build_mask = use_build_mask, build_mask = build_mask)
+
+def get_occ_path():
+    occ_path = ""
+    try:
+        occ_path = subprocess.check_output("which occ", shell=True)
+        occ_path = occ_path.decode("utf-8", "strict")
+    except Exception as e:
+        fail(e)
+    if occ_path != "":
+        occ_path = occ_path.strip("\n")
+    return os.path.dirname(os.path.realpath(occ_path))
+
+def fix_occ_permissions():
+    occ_path = get_occ_path()
+    occ = os.path.join(occ_path, "occ")
+    s = os.stat(occ)
+    if not (s.st_mode & stat.S_IXUSR):
+        os.chmod(occ, s.st_mode | stat.S_IXUSR)
+
+def occ_update():
+    occ_path = get_occ_path()
+    try:
+        os.chdir(occ_path)
+        popen = subprocess.Popen("git pull", shell = True)
+        popen.wait()
+    except Exception as e:
+        fail(e)
+    fix_occ_permissions()
+
+if __name__ == '__main__':
+    # create all important directories
+
+    touch_dir(OCC_CONF_DIR)
+    touch_dir(OCC_INDEX_DIR)
+    touch_dir(OCC_HEADER_CACHE_DIR)
+    touch_dir(OCC_COMPILE_DIR)
+
+    if len(sys.argv) == 1:
+        subprocess.call(sys.argv[0] + " -h", shell = True)
+        exit(0)
+    args = parse_args()
+
+    debug(args, 4)
+
+    if args.initialize:
+        initialize_occ_project(args.initialize)
+    if args.index:
+        index_occ_project()
+    if args.deindex:
+        deindex_occ_project()
+    if args.link_with:
+        add_dependencies_to_occ_project(args.link_with)
+    if args.unlink:
+        remove_dependencies_from_occ_project(args.unlink)
+    if args.add_default_masks:
+        add_default_mask(CURRENT_PROJ_CONF)
+    if args.compile or args.compile_and_execute or args.compile_no_dependencies:
+        use_build_mask = False
+        build_mask = ""
+        if args.mask:
+            use_build_mask = True
+            build_mask = args.mask
+        sem = Semaphore(args.paralimit)
+        should_compile_dependencies = True
+        if args.compile_no_dependencies:
+            should_compile_dependencies = False
+        output_file = compile_occ_project_r(CURRENT_PROJ_CONF, sem, use_build_mask = use_build_mask, build_mask = build_mask, compile_dependencies = should_compile_dependencies)
+        if args.output:
+            shutil.copy2(output_file, args.output)
+        if args.compile_and_execute:
+            log("Compile successful, executing %s" % output)
+            os.execv(output, [output])
+    if args.rebuild:
+        use_build_mask = False
+        build_mask = ""
+        if args.mask:
+            use_build_mask = True
+            build_mask = args.mask
+        rebuild_occ_project(CURRENT_PROJ_CONF, use_build_mask = use_build_mask, build_mask = build_mask)
+    if args.clean:
+        clean_occ_project()
+    if args.clean_deep:
+        clean_occ_project_deep(CURRENT_PROJ_CONF)
+    if args.clean_header_cache:
+        clean_header_cache()
+    if args.git:
+        git_occ_project(args.git)
+    if args.git_recursive:
+        log_warn("Starting recursive git push/pull")
+        git_recursively(CURRENT_PROJ_CONF)
+        fix_occ_permissions()
+    if args.self_update:
+        occ_update()
+    exit(0)
