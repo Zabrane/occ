@@ -56,7 +56,7 @@ class bcolors:
 
 def parse_args():
     global VERBOSITY_LEVEL
-    parser = argparse.ArgumentParser(description='The Omnicloud Compiler toolChain')
+    parser = argparse.ArgumentParser(description='The Overcomplicated Compiler')
     parser.add_argument('-o', '--output', help = 'Copy the final output binary to this path.', action = 'store')
     parser.add_argument('-v', '--verbosity', help = 'Turn on verbose output', action = 'count', default = 0)
     parser.add_argument('-d', '--debug', help = 'Debug build', action = 'store_true')
