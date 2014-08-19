@@ -195,7 +195,7 @@ Readme for PROJECTNAME
 ======================
 '''
 
-def get_command(command):
+def get_command_path(command, tool_dirs = []):
     if command in COMMANDS:
         return COMMANDS[command]
     # first check if is occ binary
@@ -203,7 +203,9 @@ def get_command(command):
     if not os.path.exists(command_path):
         # then check if system binary
         try:
-            which_output = subprocess.check_output("which %s" % command, shell = True)
+            env_path = ":".join(tool_dirs + [PATH])
+            debug("finding command path of [" + command + "] with env PATH [" + env_path + "]", 3)
+            which_output = subprocess.check_output("which %s" % command, shell = True, env = {"PATH": env_path})
             command_path = which_output.decode("utf-8").replace("\n", "")
         except subprocess.CalledProcessError as e:
             fail("Your system does not appear to support '%s'." % command)
@@ -398,7 +400,7 @@ def get_project_json_with_mask(project_cfg_path, build_mask):
             fail("Unknown type of key %s in project mask" % key)
     return project_json
 
-def compile_occ_project(project_cfg_path, sem, i_dirs = [], use_build_mask = False, build_mask = ""):
+def compile_occ_project(project_cfg_path, sem, include_dirs = [], tool_dirs = [], use_build_mask = False, build_mask = ""):
     constant_compiler_flags = " -Xclang -fcolor-diagnostics -Qunused-arguments"
     project_name = get_project_name(project_cfg_path)
     project_path = get_project_path(project_cfg_path)
@@ -415,16 +417,14 @@ def compile_occ_project(project_cfg_path, sem, i_dirs = [], use_build_mask = Fal
     source_paths = [os.path.join(project_path, "src")]
     for additional_src_dir in project_json["additional-src-dirs"]:
         source_paths += [os.path.join(project_path, additional_src_dir)]
-    include_dirs = [
-        os.path.join(project_path, "include"),
-    ] + source_paths + i_dirs
     for include_dir in project_json["include"]:
         if include_dir[0] != '/':
             include_dir = os.path.join(project_path, include_dir)
         include_dirs.append(include_dir)
     include_dirs_arg = "-I" + " -I".join(include_dirs)
-    preprocessor_bin = get_command(project_json["preprocessor"])
-    compiler_bin = get_command(project_json["compiler"])
+    env_path = ":".join(tool_dirs + [PATH])
+    preprocessor_bin = get_command_path(project_json["preprocessor"], tool_dirs)
+    compiler_bin = get_command_path(project_json["compiler"], tool_dirs)
     general_flags = " ".join(project_json["general-flags"])
     build_mask_label = "default" if (build_mask == "") else ("_" + build_mask)
     output_path = os.path.join(OCC_COMPILE_DIR, project_name, build_mask_label)
@@ -457,7 +457,7 @@ def compile_occ_project(project_cfg_path, sem, i_dirs = [], use_build_mask = Fal
             compiler_pipe = ("%s -H -E -x c %s %s %s" % (preprocessor_bin, general_flags + " " + " ".join(project_json["pp-flags"]), constant_compiler_flags, include_dirs_arg))
             compiler_d_cache_pipe = ("%s 2> >(tee %s 1>&2)" % (compiler_pipe, d_cache_tmp_path))
             env = {
-                "PATH": PATH,
+                "PATH": env_path,
                 "COLUMNS": COLUMNS,
                 "INPUT_FILE": source_file_name
             }
@@ -481,7 +481,11 @@ def compile_occ_project(project_cfg_path, sem, i_dirs = [], use_build_mask = Fal
                 lib_build_dir = os.path.join(output_path, "libs", lib_name)
                 touch_dir(lib_build_dir)
                 # call library build script - should generate object files in build/$lib_name
-                output_o_files_raw = subprocess.check_output([os.path.join(libs_dir, f), lib_build_dir, build_mask], shell = False)
+                env = {
+                    "PATH": env_path,
+                    "COLUMNS": COLUMNS,
+                }
+                output_o_files_raw = subprocess.check_output([os.path.join(libs_dir, f), lib_build_dir, build_mask], shell = False, env = env)
                 output_o_files = filter(None, output_o_files_raw.decode('UTF-8').split("\n"))
                 # add generated o files to o_file_paths
                 for new_o_file in output_o_files:
@@ -515,7 +519,7 @@ def compile_occ_project(project_cfg_path, sem, i_dirs = [], use_build_mask = Fal
         out_tmp_o_path = out_o_path + ".tmp"
         compile_command = "set -e; %s %s %s %s > %s; mv %s %s" % (compiler_bin, general_flags, extra_compiler_flags, preprocessed_path, out_tmp_o_path, out_tmp_o_path, out_o_path)
         env = {
-            "PATH": PATH,
+            "PATH": env_path,
             "COLUMNS": COLUMNS,
             "INCLUDE_ARGS": include_dirs_arg,
             "INPUT_FORMAT": input_format,
@@ -539,7 +543,7 @@ general_flags = ["-nostdlib"]
 conf_objs = ["pthread", ...] (only pkg-config able stuff)
 o_files = ["list", "of", "object", "files", "with", "full", "path"]
 '''
-def link_occ_project(project_linker, output, general_flags, conf_objs, o_files, libraries):
+def link_occ_project(project_linker, t_dirs, output, general_flags, conf_objs, o_files, libraries):
     if len(o_files) == 0:
         log("Nothing to link")
         return True
@@ -551,7 +555,7 @@ def link_occ_project(project_linker, output, general_flags, conf_objs, o_files, 
         libraries = " ".join(libraries)
     else:
         libraries = ""
-    compiler_cmd = "%s %s %s %s %s -o %s" % (project_linker, general_flags, o_files, libraries, conf_objs, output)
+    compiler_cmd = "%s %s %s %s %s -o %s" % (get_command_path(project_linker, t_dirs), general_flags, o_files, libraries, conf_objs, output)
     debug(compiler_cmd, 1)
     status = subprocess.call([compiler_cmd], shell=True)
     if status == 0:
@@ -566,7 +570,7 @@ def link_occ_library(output, lib_type, o_files):
     if os.path.exists(output):
         os.unlink(output)
     if "static" in lib_type:
-        compiler_cmd = "%s -cvq %s" % (get_command("ar"), output)
+        compiler_cmd = "%s -cvq %s" % (get_command_path("ar"), output)
         o_files = " ".join(o_files)
         compiler_cmd += " %s" % o_files
         try:
@@ -578,8 +582,9 @@ def link_occ_library(output, lib_type, o_files):
     else:
         fail("Unsupported library type. (non-static)")
 
-def gather_project_i_dirs_and_libraries(proj, already_scanned_projects = [], build_mask = ''):
+def gather_project_i_dirs_and_libraries(proj, root, already_scanned_projects = [], build_mask = ''):
     i_dirs = []
+    t_dirs = []
     libraries = []
     conf_objs = []
     general_flags = []
@@ -594,8 +599,9 @@ def gather_project_i_dirs_and_libraries(proj, already_scanned_projects = [], bui
     for p in curr_proj_json['dependencies']:
         if p in already_scanned_projects:
             continue
-        cur_i_dirs, cur_libraries, cur_conf_objs, cur_compiler_flags = gather_project_i_dirs_and_libraries(p, already_scanned_projects, build_mask = build_mask)
+        cur_i_dirs, cur_tool_dirs, cur_libraries, cur_conf_objs, cur_compiler_flags = gather_project_i_dirs_and_libraries(p, False, already_scanned_projects, build_mask = build_mask)
         i_dirs += cur_i_dirs
+        t_dirs += cur_tool_dirs
         for lib in cur_libraries:
             if not lib in libraries:
                 libraries.append(lib)
@@ -603,7 +609,8 @@ def gather_project_i_dirs_and_libraries(proj, already_scanned_projects = [], bui
         general_flags += cur_conf_objs
         already_scanned_projects.append(p)
     i_dirs += [os.path.join(curr_proj_path, 'include')]
-    if len(curr_proj_json['library']) > 0:
+    t_dirs += [os.path.join(curr_proj_path, 'tools')]
+    if len(curr_proj_json['library']) > 0 and not root:
 #        print('library')
         curr_library_path = ''
         if build_mask == '':
@@ -614,18 +621,18 @@ def gather_project_i_dirs_and_libraries(proj, already_scanned_projects = [], bui
         #        print('curr_library_path: ' + curr_library_path)
         conf_objs += curr_proj_json['pkg-config']
         general_flags += curr_proj_json['general-flags']
-    return (i_dirs, libraries, conf_objs, general_flags)
+    return (i_dirs, t_dirs, libraries, conf_objs, general_flags)
 
 
-def get_compile_fn(proj_conf_path, sem, i_dirs = [], use_build_mask = False, build_mask = "", compile_dependencies = True):
+def get_compile_fn(proj_conf_path, sem, use_build_mask = False, build_mask = "", compile_dependencies = True):
     def compile_fn():
-        compile_occ_project_r(proj_conf_path, sem, i_dirs = i_dirs, use_build_mask = use_build_mask, build_mask = build_mask, compile_dependencies = compile_dependencies)
+        compile_occ_project_r(proj_conf_path, sem, use_build_mask = use_build_mask, build_mask = build_mask, compile_dependencies = compile_dependencies)
     return compile_fn
 
 ##
 # Compiles the current project
 ##
-def compile_occ_project_r(proj_conf_path, sem, i_dirs = [], use_build_mask = False, build_mask = "", compile_dependencies = True):
+def compile_occ_project_r(proj_conf_path, sem, use_build_mask = False, build_mask = "", compile_dependencies = True):
     debug("[compile_occ_project_r] compiling project with proj_conf_path [%s]" % proj_conf_path, 1)
     project_json = None
     if not use_build_mask:
@@ -637,9 +644,6 @@ def compile_occ_project_r(proj_conf_path, sem, i_dirs = [], use_build_mask = Fal
     debug("[compile_occ_project_r] project_json decoded [%s]" % project_json, 3)
     project_build_path = os.path.join(os.path.dirname(proj_conf_path), "build")
     touch_dir(project_build_path)
-    conf_objs = []
-    general_flags = []
-    libraries = []
     debug("[%s] checking dependencies" % project_name, 1)
     dependencies = project_json["dependencies"]
     dependency_build_mask = project_json["dependency-build-mask"]
@@ -664,28 +668,23 @@ def compile_occ_project_r(proj_conf_path, sem, i_dirs = [], use_build_mask = Fal
             curr_proj_cfg = os.path.realpath(os.path.join(OCC_INDEX_DIR, dep_proj))
             curr_proj_json = read_project_json(curr_proj_cfg)
             thread = Thread()
-            thread.run = get_compile_fn(curr_proj_cfg, sem, i_dirs, use_build_mask = use_build_mask, build_mask = dependency_build_mask)
+            thread.run = get_compile_fn(curr_proj_cfg, sem, use_build_mask = use_build_mask, build_mask = dependency_build_mask)
             thread.start()
             r_compiler_threads.append(thread)
-        cur_i_dirs, cur_libraries, cur_conf_objs, cur_compiler_flags = gather_project_i_dirs_and_libraries(dep_proj, build_mask = dependency_build_mask)
-        if not compile_dependencies:
-            non_existing_libraries = []
-            for cur_library in cur_libraries:
-                if not os.path.exists(cur_library):
-                    non_existing_libraries.append(cur_library)
-            if len(non_existing_libraries) > 0:
-                fail("Expected the following static libraries to exist (output from the linker stage) but they where missing: %s\n\nCannot compile without dependencies, please run occ again with -c instead of -cnd." % non_existing_libraries)
-            log_ok("Skipping dependency [%s]" % dep_proj)
-        i_dirs += cur_i_dirs
-        # We are not intrested in linking with dependency libraries unless we are linking an executable.
-        if not is_library:
-            libraries += cur_libraries
-        conf_objs += cur_conf_objs
-        general_flags += cur_compiler_flags
+    i_dirs, t_dirs, libraries, conf_objs, general_flags = gather_project_i_dirs_and_libraries(project_name, True, build_mask = dependency_build_mask)
+    if not compile_dependencies:
+        non_existing_libraries = []
+        for library in libraries:
+            if not os.path.exists(library):
+                non_existing_libraries.append(library)
+        if len(non_existing_libraries) > 0:
+            fail("Expected the following static libraries to exist (output from the linker stage) but they where missing: %s\n\nCannot compile without dependencies, please run occ again with -c instead of -cnd." % non_existing_libraries)
+        log_ok("Skipping dependency [%s]" % dep_proj)
     for thread in r_compiler_threads:
         thread.join()
+    debug("compiling project [" + project_name + "] with include dirs [" + ":".join(i_dirs) + "] tool dirs [" + ":".join(t_dirs) + "]", 3)
     #print('i dirs: ' + ":".join(i_dirs))
-    o_files = compile_occ_project(proj_conf_path, sem, i_dirs = i_dirs, use_build_mask = use_build_mask, build_mask = build_mask)
+    o_files = compile_occ_project(proj_conf_path, sem, include_dirs = i_dirs, tool_dirs = t_dirs, use_build_mask = use_build_mask, build_mask = build_mask)
     if o_files == None:
         fail("Compilation cannot continue - no object files are present.")
     linker_output = os.path.join(project_build_path, project_json["output"])
@@ -707,7 +706,7 @@ def compile_occ_project_r(proj_conf_path, sem, i_dirs = [], use_build_mask = Fal
         else:
             # IMPORTANT: Libraries must be ordered so dependencies comes last. If A needs B and B needs C the order should be A B C. This is the opposite order of the libraries array at this point so we reverse it.
             libraries.reverse()
-            result = link_occ_project(project_json["project-linker"], linker_output, project_json["general-flags"], conf_objs, o_files, libraries)
+            result = link_occ_project(project_json["project-linker"], t_dirs, linker_output, project_json["general-flags"], conf_objs, o_files, libraries)
         if result:
             log_ok("Linking of [%s] complete" % project_name)
         else:
