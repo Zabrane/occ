@@ -73,8 +73,6 @@ def parse_args():
     parser.add_argument('-u', '--unlink', help = 'Remove project as dependency', nargs = '+')
     parser.add_argument('-x', '--index', help = 'Index current project', action = 'store_true')
     parser.add_argument('-dx', '--deindex', help = 'Remove the current project from the OCC project index', action = 'store_true')
-    parser.add_argument('-g', '--git', help = 'push: push to remote git, pull: pull from remote git, sync: occasionally push/pull to/from remote git', choices = ['push', 'pull', 'sync'])
-    parser.add_argument('-gpr', '--git-recursive', help = 'Pulls this project and all dependencies', action = 'store_true')
     parser.add_argument('-m', '--mask', help = 'Build project with the specified mask')
     parser.add_argument('-am', '--add-default-masks', help = 'Add default compile masks to project file', action = 'store_true')
     parser.add_argument('-up', '--self-update', help = "Updates the occ.", action = 'store_true')
@@ -720,44 +718,6 @@ def compile_occ_project_r(proj_conf_path, sem, i_dirs = [], use_build_mask = Fal
     os.close(lock_file)
     return linker_output
 
-##
-# Handles git push/pull requests and also makes it possible to continuously sync the project.
-##
-def git_occ_project(arg):
-    log("Starting GIT")
-    if not os.path.exists(os.path.join(CURRENT_DIR, ".git")):
-        fail("This is not a git directory")
-    if arg == 'push':
-        try:
-            status = subprocess.call("git push", shell = True)
-        except subprocess.CalledProcessError as e:
-            fail("A git exception occurred: %s " % e)
-        return
-    elif arg == 'pull':
-        try:
-            status = subprocess.call("git pull", shell = True)
-        except subprocess.CalledProcessError as e:
-            debug("git pull failed", 0)
-        return
-    else:
-        while 1:
-            output = ""
-            try:
-                output = subprocess.check_output(["git pull"], stderr = subprocess.STDOUT, shell = True)
-                output = subprocess.check_output(["git push"], stderr = subprocess.STDOUT, shell = True)
-                sys.stdout.write("\r%sLast sync %s OK%s            " % (bcolors.OKGREEN, time.ctime(), bcolors.ENDC))
-                sys.stdout.flush()
-                time.sleep(20)
-            except subprocess.CalledProcessError as e:
-                log_warn("\nA git exception occurred: %s" % e)
-                log_warn("Command output\n%s" % e.output)
-#                sndfile = "/" + "/".join(filter(None, os.path.realpath(sys.argv[0]).split("/")[:-1])) + "/audio/go.wav"
-#                output = subprocess.check_output(["mplayer %s -af volume=-20 -speed 1.6" % sndfile], stderr = subprocess.STDOUT, shell = True)
-                exit(1)
-            except KeyboardInterrupt as e:
-                log("\nExiting")
-                return
-
 def get_project_dependencies(proj_conf_path=None):
     if proj_conf_path == None:
         fail("Cannot pull bad dir")
@@ -770,36 +730,6 @@ def get_project_dependencies(proj_conf_path=None):
         n_project_conf_path = os.path.join(project_path, "occ.project")
         proj_paths += get_project_dependencies(n_project_conf_path)
     return proj_paths
-
-def git_recursively(proj_conf_path=None):
-    if proj_conf_path == None:
-        fail("Cannot pull bad dir")
-    popens = []
-    project_paths = get_project_dependencies(proj_conf_path)
-    project_paths = list(set(project_paths))
-    project_paths.append(get_occ_path())
-    project_paths.sort()
-    top_levels =[]
-    for path in project_paths:
-        os.chdir(path)
-        try:
-            top_level = subprocess.check_output("git rev-parse --show-toplevel", shell=True)
-            top_level = top_level.decode("utf-8").replace("\n", "")
-            if top_level not in top_levels:
-                top_levels.append(top_level)
-        except Exception as e:
-            fail(e)
-    top_levels.sort()
-    for level in top_levels:
-        os.chdir(level)
-        log("Adding path: {}".format(level))
-        try:
-            popens.append(subprocess.Popen("git pull && git push", shell=True))
-        except Exception as e:
-            fail(e)
-
-    for popen in popens:
-        popen.wait()
 
 def add_dependencies_to_occ_project(links):
     #remove potential duplicates
@@ -914,34 +844,6 @@ def rebuild_occ_project(project_cfg_path, use_build_mask = False, build_mask = "
     log("Cleanup complete\n")
     compile_occ_project_r(project_cfg_path, use_build_mask = use_build_mask, build_mask = build_mask)
 
-def get_occ_path():
-    occ_path = ""
-    try:
-        occ_path = subprocess.check_output("which occ", shell=True)
-        occ_path = occ_path.decode("utf-8", "strict")
-    except Exception as e:
-        fail(e)
-    if occ_path != "":
-        occ_path = occ_path.strip("\n")
-    return os.path.dirname(os.path.realpath(occ_path))
-
-def fix_occ_permissions():
-    occ_path = get_occ_path()
-    occ = os.path.join(occ_path, "occ")
-    s = os.stat(occ)
-    if not (s.st_mode & stat.S_IXUSR):
-        os.chmod(occ, s.st_mode | stat.S_IXUSR)
-
-def occ_update():
-    occ_path = get_occ_path()
-    try:
-        os.chdir(occ_path)
-        popen = subprocess.Popen("git pull", shell = True)
-        popen.wait()
-    except Exception as e:
-        fail(e)
-    fix_occ_permissions()
-
 if __name__ == '__main__':
     # create all important directories
 
@@ -998,12 +900,6 @@ if __name__ == '__main__':
         clean_occ_project_deep(CURRENT_PROJ_CONF)
     if args.clean_header_cache:
         clean_header_cache()
-    if args.git:
-        git_occ_project(args.git)
-    if args.git_recursive:
-        log_warn("Starting recursive git push/pull")
-        git_recursively(CURRENT_PROJ_CONF)
-        fix_occ_permissions()
     if args.self_update:
         occ_update()
     exit(0)
