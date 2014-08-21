@@ -401,6 +401,7 @@ def get_project_json_with_mask(project_cfg_path, build_mask):
     return project_json
 
 def compile_occ_project(project_cfg_path, sem, include_dirs = [], tool_dirs = [], use_build_mask = False, build_mask = ""):
+    include_dirs = include_dirs[:]
     constant_compiler_flags = " -Xclang -fcolor-diagnostics -Qunused-arguments"
     project_name = get_project_name(project_cfg_path)
     project_path = get_project_path(project_cfg_path)
@@ -582,7 +583,7 @@ def link_occ_library(output, lib_type, o_files):
     else:
         fail("Unsupported library type. (non-static)")
 
-def gather_project_i_dirs_and_libraries(proj, root, already_scanned_projects = [], build_mask = ''):
+def gather_project_i_dirs_and_libraries(proj, root, already_scanned_projects, build_mask = ''):
     i_dirs = []
     t_dirs = []
     libraries = []
@@ -671,7 +672,7 @@ def compile_occ_project_r(proj_conf_path, sem, use_build_mask = False, build_mas
             thread.run = get_compile_fn(curr_proj_cfg, sem, use_build_mask = use_build_mask, build_mask = dependency_build_mask)
             thread.start()
             r_compiler_threads.append(thread)
-    i_dirs, t_dirs, libraries, conf_objs, general_flags = gather_project_i_dirs_and_libraries(project_name, True, build_mask = dependency_build_mask)
+    i_dirs, t_dirs, libraries, conf_objs, general_flags = gather_project_i_dirs_and_libraries(project_name, True, [], build_mask = dependency_build_mask)
     if not compile_dependencies:
         non_existing_libraries = []
         for library in libraries:
