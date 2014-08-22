@@ -54,6 +54,9 @@ class bcolors:
         self.FAIL = ''
         self.ENDC = ''
 
+def merge_dict(x, y):
+    return dict(list(x.items()) + list(y.items()))
+
 def parse_args():
     global VERBOSITY_LEVEL
     parser = argparse.ArgumentParser(description='The Overcomplicated Compiler')
@@ -459,11 +462,11 @@ def compile_occ_project(project_cfg_path, sem, include_dirs = [], tool_dirs = []
             d_cache_tmp_path = d_cache_path + ".tmp"
             compiler_pipe = ("%s -H -E -x c %s %s %s" % (preprocessor_bin, general_flags + " " + " ".join(project_json["pp-flags"]), constant_compiler_flags, include_dirs_arg))
             compiler_d_cache_pipe = ("%s 2> >(tee %s 1>&2)" % (compiler_pipe, d_cache_tmp_path))
-            env = {
+            env = merge_dict(os.environ, {
                 "PATH": env_path,
                 "COLUMNS": COLUMNS,
                 "INPUT_FILE": source_file_name
-            }
+            })
             out_tmp_i_path = out_i_path + ".tmp"
             preprocess_command = "%s \"%s\" 1> >(set -e; cat - > %s; mv %s %s)" % (compiler_d_cache_pipe, source_file_path, out_tmp_i_path, out_tmp_i_path, out_i_path)
             preprocessor = Thread()
@@ -484,10 +487,10 @@ def compile_occ_project(project_cfg_path, sem, include_dirs = [], tool_dirs = []
                 lib_build_dir = os.path.join(output_path, "libs", lib_name)
                 touch_dir(lib_build_dir)
                 # call library build script - should generate object files in build/$lib_name
-                env = {
+                env = merge_dict(os.environ, {
                     "PATH": env_path,
                     "COLUMNS": COLUMNS,
-                }
+                })
                 output_o_files_raw = subprocess.check_output([os.path.join(libs_dir, f), lib_build_dir, build_mask], shell = False, env = env)
                 output_o_files = filter(None, output_o_files_raw.decode('UTF-8').split("\n"))
                 # add generated o files to o_file_paths
@@ -521,13 +524,13 @@ def compile_occ_project(project_cfg_path, sem, include_dirs = [], tool_dirs = []
         extra_compiler_flags = "-x " + input_format + " " + " ".join(project_json["o-flags"])
         out_tmp_o_path = out_o_path + ".tmp"
         compile_command = "set -e; %s %s %s %s > %s; mv %s %s" % (compiler_bin, general_flags, extra_compiler_flags, preprocessed_path, out_tmp_o_path, out_tmp_o_path, out_o_path)
-        env = {
+        env = merge_dict(os.environ, {
             "PATH": env_path,
             "COLUMNS": COLUMNS,
             "INCLUDE_ARGS": include_dirs_arg,
             "INPUT_FORMAT": input_format,
             "INPUT_FILE": preprocessed_path
-        }
+        })
         env.update(project_json["o-env"])
         o_creator = Thread()
         o_creator.run = get_command_fn(compile_command, sem, "Compiling file \"%s\"" % source_file_path, env = env, wait_thread = wait_thread)
