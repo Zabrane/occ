@@ -78,7 +78,6 @@ def parse_args():
     parser.add_argument('-dx', '--deindex', help = 'Remove the current project from the OCC project index', action = 'store_true')
     parser.add_argument('-m', '--mask', help = 'Build project with the specified mask')
     parser.add_argument('-am', '--add-default-masks', help = 'Add default compile masks to project file', action = 'store_true')
-    parser.add_argument('-up', '--self-update', help = "Updates the occ.", action = 'store_true')
     args = parser.parse_args()
     VERBOSITY_LEVEL = args.verbosity
     return args
@@ -905,6 +904,4 @@ if __name__ == '__main__':
         clean_occ_project_deep(CURRENT_PROJ_CONF)
     if args.clean_header_cache:
         clean_header_cache()
-    if args.self_update:
-        occ_update()
     exit(0)
