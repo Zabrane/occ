@@ -12,6 +12,7 @@ format and tracks your installed projects for you.
 ## Quick Start
 
 - `occ.project` specifies the build config for a project. See [librcd's](https://github.com/jumpstarter-io/librcd/blob/master/occ.project) for an example.
+- `src/` contains source code, `include/` exported headers, and `libs/` external libraries with their own build scripts.
 - `occ -x` will index the current directory as a project with the same name as the directory. The name is global, and used for dependency management.
 - `occ -c -m <target>` will build a particular target (specified in occ.project), often "debug" or "release".
 - Preprocessor and object file caches are stored in `~/.config/occ/`. `occ -cc`/`-cd`/`-ch` will clean them.
