@@ -789,6 +789,6 @@ if __name__ == '__main__':
         if args.output:
             shutil.copy2(output_file, args.output)
         if args.compile_and_execute:
-            log("Compile successful, executing %s" % output)
-            os.execv(output, [output])
+            log("Compile successful, executing %s" % output_file)
+            os.execv(output_file, [output_file])
     exit(0)
