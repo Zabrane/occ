@@ -72,8 +72,6 @@ def parse_args():
     parser.add_argument('-ch', '--clean-header-cache', help = "Cleans the header cache", action = 'store_true')
     parser.add_argument('-p', '--paralimit', help = 'The maximum limit of parallel workers.', action = 'store', type=int, default = 9)
     parser.add_argument('-r', '--rebuild', help = 'Rebuild current project', action = 'store_true')
-    parser.add_argument('-l', '--link-with', help = 'Link this project with other OCC project', nargs = '+')
-    parser.add_argument('-u', '--unlink', help = 'Remove project as dependency', nargs = '+')
     parser.add_argument('-x', '--index', help = 'Index current project', action = 'store_true')
     parser.add_argument('-dx', '--deindex', help = 'Remove the current project from the OCC project index', action = 'store_true')
     parser.add_argument('-m', '--mask', help = 'Build project with the specified mask')
@@ -699,61 +697,6 @@ def compile_occ_project_r(proj_conf_path, sem, use_build_mask = False, build_mas
     os.close(lock_file)
     return linker_output
 
-def get_project_dependencies(proj_conf_path=None):
-    if proj_conf_path == None:
-        fail("Cannot pull bad dir")
-    project_config = read_project_json(proj_conf_path)
-    project_path = get_project_path(proj_conf_path)
-    proj_paths = []
-    proj_paths.append(project_path)
-    for dep in project_config["dependencies"]:
-        project_path = get_project_path_by_index(dep)
-        n_project_conf_path = os.path.join(project_path, "occ.project")
-        proj_paths += get_project_dependencies(n_project_conf_path)
-    return proj_paths
-
-def add_dependencies_to_occ_project(links):
-    #remove potential duplicates
-    log("Adding dependencies")
-    links = list(set(links))
-    project_json = read_project_json(CURRENT_PROJ_CONF)
-    if project_json == None:
-        fail("Could not read project config")
-    num_added = 0
-    for link in links:
-        if os.path.exists(OCC_INDEX_DIR + link):
-            log("Adding dependency \"%s\"" % link)
-            project_json["dependencies"].append(link)
-            num_added += 1
-        else:
-            fail("Cannot resolve dependency \"%s\", try indexing it first" % link)
-
-    if num_added == 0:
-        log("No dependencies added")
-        exit(1)
-    else:
-        project_json["dependencies"] = sorted(list(set(project_json["dependencies"])))
-        write_json(CURRENT_PROJ_CONF, project_json)
-        log("Added %s %s\n" % (num_added, ("dependencies", "dependency")[num_added == 1]))
-
-def remove_dependencies_from_occ_project(links):
-    log("Removing \"%s\" from project dependencies" % ",".join(links))
-    links = list(set(links))
-    project_json = read_project_json(CURRENT_PROJ_CONF)
-    if project_json == None:
-        fail("Could not read project config")
-    num_removed = len(project_json["dependencies"])
-    if project_json == None:
-        fail("Could not read project config")
-    project_json["dependencies"] = list(set(project_json["dependencies"]) ^ set(links))
-    num_removed -= len(project_json["dependencies"])
-    if num_removed > 0:
-        log("Removed %s %s\n" % (num_removed, ("dependency", "dependencies")[num_removed > 0]))
-        write_json(CURRENT_PROJ_CONF, project_json)
-    else:
-        log_warn("Failed to remove any dependencies")
-        exit(1)
-
 def clean_occ_project():
     project_json = read_project_json(CURRENT_PROJ_CONF)
     if project_json == None:
@@ -846,10 +789,6 @@ if __name__ == '__main__':
         index_occ_project()
     if args.deindex:
         deindex_occ_project()
-    if args.link_with:
-        add_dependencies_to_occ_project(args.link_with)
-    if args.unlink:
-        remove_dependencies_from_occ_project(args.unlink)
     if args.add_default_masks:
         add_default_mask(CURRENT_PROJ_CONF)
     if args.compile or args.compile_and_execute or args.compile_no_dependencies:
