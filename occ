@@ -15,6 +15,7 @@ import binascii
 import time
 import traceback
 import fcntl
+import shutil
 
 PATH = os.getenv("PATH")
 OCC_CONF_DIR = "%s/.config/occ" % os.getenv("HOME")
