@@ -772,6 +772,10 @@ if __name__ == '__main__':
     if args.clean_header_cache:
         clean_header_cache()
     if args.compile or args.compile_and_execute or args.compile_no_dependencies:
+        project_index_path = get_project_index_path(CURRENT_PROJ_NAME)
+        if not os.path.islink(project_index_path):
+            log_warn("Current project '%s' not indexed: indexing automatically." % CURRENT_PROJ_NAME)
+            index_occ_project()
         use_build_mask = False
         build_mask = ""
         if args.mask:
