@@ -71,11 +71,9 @@ def parse_args():
     parser.add_argument('-cd', '--clean-deep', help = "Removes all previously compiled files and intermediary files for this project and all dependencies", action = 'store_true')
     parser.add_argument('-ch', '--clean-header-cache', help = "Cleans the header cache", action = 'store_true')
     parser.add_argument('-p', '--paralimit', help = 'The maximum limit of parallel workers.', action = 'store', type=int, default = 9)
-    parser.add_argument('-r', '--rebuild', help = 'Rebuild current project', action = 'store_true')
     parser.add_argument('-x', '--index', help = 'Index current project', action = 'store_true')
     parser.add_argument('-dx', '--deindex', help = 'Remove the current project from the OCC project index', action = 'store_true')
     parser.add_argument('-m', '--mask', help = 'Build project with the specified mask')
-    parser.add_argument('-am', '--add-default-masks', help = 'Add default compile masks to project file', action = 'store_true')
     args = parser.parse_args()
     VERBOSITY_LEVEL = args.verbosity
     return args
@@ -745,29 +743,6 @@ def clean_header_cache():
         os.unlink(os.path.join(OCC_HEADER_CACHE_DIR, file))
     log("Done")
 
-def add_default_mask(proj_conf_path):
-    project_json = read_project_json(proj_conf_path)
-    if "build-masks" in project_json:
-        fail("Cannot add default masks to a project conf that already has them")
-    output, ext = os.path.splitext(project_json["output"])
-    project_json["build-masks"] = {"debug" : {"output" : output + ".debug" + ext, "general-flags" : ["-DDEBUG"]}, "release" : {"output" : project_json["output"], "general-flags" : ["-O3"]}}
-    write_json(proj_conf_path, project_json)
-    log("Added default compile masks")
-
-##
-# Rebuilds the project ie: cleans the project and then compiles it
-##
-import shutil
-def rebuild_occ_project(project_cfg_path, use_build_mask = False, build_mask = ""):
-    log("Cleaning for rebuild")
-    project_json = read_json(project_cfg_path)
-    if project_json == None:
-        fail("Could not open project configuration")
-    log("Removing compiled files for \"%s\"" % CURRENT_PROJ_NAME)
-    clean_occ_project_deep(project_cfg_path)
-    log("Cleanup complete\n")
-    compile_occ_project_r(project_cfg_path, use_build_mask = use_build_mask, build_mask = build_mask)
-
 if __name__ == '__main__':
     # create all important directories
 
@@ -789,8 +764,12 @@ if __name__ == '__main__':
         index_occ_project()
     if args.deindex:
         deindex_occ_project()
-    if args.add_default_masks:
-        add_default_mask(CURRENT_PROJ_CONF)
+    if args.clean:
+        clean_occ_project()
+    if args.clean_deep:
+        clean_occ_project_deep(CURRENT_PROJ_CONF)
+    if args.clean_header_cache:
+        clean_header_cache()
     if args.compile or args.compile_and_execute or args.compile_no_dependencies:
         use_build_mask = False
         build_mask = ""
@@ -807,17 +786,4 @@ if __name__ == '__main__':
         if args.compile_and_execute:
             log("Compile successful, executing %s" % output)
             os.execv(output, [output])
-    if args.rebuild:
-        use_build_mask = False
-        build_mask = ""
-        if args.mask:
-            use_build_mask = True
-            build_mask = args.mask
-        rebuild_occ_project(CURRENT_PROJ_CONF, use_build_mask = use_build_mask, build_mask = build_mask)
-    if args.clean:
-        clean_occ_project()
-    if args.clean_deep:
-        clean_occ_project_deep(CURRENT_PROJ_CONF)
-    if args.clean_header_cache:
-        clean_header_cache()
     exit(0)
