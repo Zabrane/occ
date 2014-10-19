@@ -63,7 +63,7 @@ def parse_args():
     parser.add_argument('-o', '--output', help = 'Copy the final output binary to this path.', action = 'store')
     parser.add_argument('-v', '--verbosity', help = 'Turn on verbose output', action = 'count', default = 0)
     parser.add_argument('-d', '--debug', help = 'Debug build', action = 'store_true')
-    parser.add_argument('-i', '--initialize', help = 'Initialize current directory to an OCC project', choices = ['c', 'cpp'])
+    parser.add_argument('-i', '--initialize', help = 'Initialize current empty directory as a new project based on template from specified project')
     parser.add_argument('-c', '--compile', help = 'Compile current project', action = 'store_true')
     parser.add_argument('-cx', '--compile-and-execute', help = 'Compile current project and execute it', action = 'store_true')
     parser.add_argument('-cnd', '--compile-no-dependencies', help = 'Compile current project without compiling dependencies', action = 'store_true')
@@ -181,22 +181,6 @@ def touch_dir(directory):
         except FileExistsError:
             pass
 
-GITIGNORE = '''
-Makefile
-*.slo
-*.lo
-*.o
-*.so
-*.lai
-*.la
-*.a
-'''
-
-README = '''
-Readme for PROJECTNAME
-======================
-'''
-
 def get_command_path(command, tool_dirs = []):
     tool_dirs = tool_dirs[:]
     if command in COMMANDS:
@@ -229,32 +213,25 @@ def get_project_path_by_index(project_name):
 # Initializes the current project to a OCC project.
 # Adds an entry in the users "global" OCC db.
 ###
-def initialize_occ_project():
+def initialize_occ_project(tpl_project_id):
     log("Initializing project")
     debug("Current dir: %s" % CURRENT_DIR, 2)
     project_index_path = get_project_index_path(CURRENT_PROJ_NAME);
     debug("Checking if name is unique (%s)" % project_index_path, 2)
     if (os.path.islink(project_index_path)):
-        fail("A project named '%s' is already indexed, occ does not support project name duplicates on a system." % CURRENT_PROJ_NAME)
-    for x in ['src', 'libs', 'include', 'tests']:
-        p = os.path.join(CURRENT_DIR, "%s" % x)
-        if not os.path.exists(p):
-            debug("Creating directory %s" % x, 2)
-            os.mkdir(p)
-    if not os.path.exists(CURRENT_PROJ_CONF):
-        compiler = "clang"
-        project_json = populate_project_obj({});
-        project_json["compiler"] = compiler;
-        write_json(CURRENT_PROJ_CONF, project_json)
-    index_occ_project();
-    if not os.path.exists(CURRENT_DIR + "/.gitignore"):
-        f = open(CURRENT_DIR + "/.gitignore", 'w')
-        f.write(GITIGNORE)
-        f.close()
-    if not os.path.exists(CURRENT_DIR + "/README.md"):
-        f = open(CURRENT_DIR + "/README.md", 'w')
-        f.write(README.replace("PROJECTNAME", CURRENT_PROJ_NAME))
-        f.close()
+        fail("A project named '%s' is already indexed, occ does currently not support project name duplicates on a system." % CURRENT_PROJ_NAME)
+    project_path = CURRENT_DIR
+    if os.listdir(project_path) != []:
+        fail("The current directory is not empty. Can only initialize in empty directories.")
+    tpl_project_index_path = get_project_index_path(tpl_project_id)
+    if not os.path.islink(tpl_project_index_path):
+        fail("The project '%s' does not exist or is not indexed." % tpl_project_id)
+    tpl_project_path = get_project_path_by_index(tpl_project_id)
+    if not os.path.isdir(tpl_project_path + "/template"):
+        fail("The project '%s' does not have valid template to initialize from." % tpl_project_id)
+    log("Initializing project at \"%s\"." % project_path)
+    subprocess.check_output(["/bin/cp", "-a", tpl_project_path + "/template/.", project_path], shell = False)
+    index_occ_project()
     log("Project initialized. See \"%s\" for details" % OCC_PROJECT_FILE_NAME)
 
 ##
