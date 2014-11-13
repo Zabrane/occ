@@ -35,6 +35,7 @@ try:
         COLUMNS = subprocess.check_output('stty size', shell = True, stderr = f).split()[1]
 except:
     pass
+FAIL_OUT_PATH = ""
 
 COMMANDS = {}
 
@@ -59,7 +60,7 @@ def merge_dict(x, y):
     return dict(list(x.items()) + list(y.items()))
 
 def parse_args():
-    global VERBOSITY_LEVEL
+    global VERBOSITY_LEVEL, FAIL_OUT_PATH
     parser = argparse.ArgumentParser(description='The Overcomplicated Compiler')
     parser.add_argument('-o', '--output', help = 'Copy the final output binary to this path.', action = 'store')
     parser.add_argument('-v', '--verbosity', help = 'Turn on verbose output', action = 'count', default = 0)
@@ -75,8 +76,10 @@ def parse_args():
     parser.add_argument('-x', '--index', help = 'Index current project', action = 'store_true')
     parser.add_argument('-dx', '--deindex', help = 'Remove the current project from the OCC project index', action = 'store_true')
     parser.add_argument('-m', '--mask', help = 'Build project with the specified mask')
+    parser.add_argument('-fo', '--fail-out', help = 'Output raw external failure to this file instead of stderr')
     args = parser.parse_args()
     VERBOSITY_LEVEL = args.verbosity
+    FAIL_OUT_PATH = args.fail_out
     return args
 
 print_lock = _thread.allocate_lock()
@@ -97,10 +100,17 @@ def log_warn(message):
         sys.stderr.write("%s%s%s\n" % (bcolors.WARNING, message, bcolors.ENDC))
 
 def fail_external(message, external_error_data):
+    global FAIL_OUT_PATH
     with print_lock:
-        sys.stderr.write("%sError: %s%s\n" % (bcolors.FAIL, message, bcolors.ENDC))
-        sys.stderr.write(external_error_data)
-        sys.stderr.write("\n")
+        head = "%sError: %s%s\n" % (bcolors.FAIL, message, bcolors.ENDC)
+        sys.stderr.write(head)
+        if FAIL_OUT_PATH is not None:
+            out = open(FAIL_OUT_PATH, 'w')
+        else:
+            out = sys.stderr
+        out.write(external_error_data)
+        out.write("\n")
+        out.flush()
         os._exit(1)
 
 def fail(message):
