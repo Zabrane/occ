@@ -217,6 +217,27 @@ def get_project_path_by_index(project_name):
     return project_path
 
 ###
+# Builds an object file that creates a global symbol that is a valid iovec
+# containing the source file.
+###
+def build_resource(src_file, out_file, symbol):
+    asm = """
+    .align  8
+{0}_str_start:
+    .incbin "{1}"
+{0}_str_end:
+    .align  8
+    .global {0}
+{0}:
+    .quad   {0}_str_start
+    .quad   {0}_str_end - {0}_str_start
+    """.format(symbol, src_file)
+    proc = subprocess.Popen(["as", "-o", out_file], stdin=subprocess.PIPE)
+    outdata = proc.communicate(input=bytes(asm, "UTF-8"))[0]
+    if outdata != None:
+        raise Exception()
+
+###
 # Initializes the current project to a OCC project.
 # Adds an entry in the users "global" OCC db.
 ###
@@ -484,6 +505,21 @@ def compile_occ_project(project_cfg_path, sem, include_dirs = [], tool_dirs = []
                     if (ext != ".o"):
                         continue
                     o_file_paths.append(os.path.join(lib_build_dir, new_o_file))
+    # creating object files from resources
+    # creating one object file per resource and putting them in OCC_COMPILE_DIR/[project_name]/resource/[resource_name].o
+    if ('resources' in project_json):
+        project_json['resources']
+        resources = project_json['resources']
+        res_out_path = os.path.join(output_path, "resource")
+        for res in resources.items():
+            res_symbol_name = res[0]
+            res_build_path = os.path.join(res_out_path, res_symbol_name + ".o")
+            res_source_path = os.path.join(project_path, res[1])
+            if file_needs_processing([project_cfg_path, res_source_path], res_build_path):
+                if (not os.path.exists(res_out_path)):
+                    os.mkdir(res_out_path)
+                build_resource(res_source_path, res_build_path, res_symbol_name)
+            o_file_paths.append(res_build_path)
     # creating object files from source
     # taking from preprocessed files in OCC_COMPILE_DIR/[project-name]/*.i and writing them as objects files in OCC_COMPILE_DIR/[project-name]/*.o
     o_creators = []
