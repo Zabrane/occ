@@ -160,6 +160,7 @@ def populate_project_obj(obj):
       "installdir" : "",
       "library" : "",
       "additional-src-dirs": [],
+      "resources": {},
       "dependency-build-mask" : "",
     }
     for key in default_project_obj.keys():
